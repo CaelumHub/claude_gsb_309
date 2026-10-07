@@ -252,24 +252,34 @@ class Scheduler:
         except Exception:  # noqa: BLE001
             pass
 
-        # 通知
+        # 通知：组装模板上下文需要的富信息（项目/套件/环境名、失败用例等）
         event = "build.passed" if build["status"] == "passed" else "build.failed"
+        project = self.registry.store("projects").get(project_id) or {}
+        suite = self.registry.store("suites").get(build.get("suite_id") or "") or {}
+        env = self.env_manager.get(build.get("env_id") or "") or {}
+        failures = store.results(build_id,
+                                 where=[("status", "in", ["failed", "error", "timeout"])])
         payload = {
             "build_id": build_id,
             "project_id": project_id,
+            "project_name": project.get("name", project_id),
+            "suite_name": suite.get("name", ""),
+            "env_name": env.get("name", ""),
+            "env_id": build.get("env_id"),
             "status": build["status"],
             "passed": passed,
             "total": total,
             "pass_rate": round(passed_ratio * 100, 1),
+            "failed": len(failures),
+            "failed_cases": [f.get("case_name") for f in failures if f.get("case_name")],
             "duration": build.get("duration", 0.0),
+            "trigger": build.get("trigger", "manual"),
         }
         self.notify.fire(project_id, "build.finished", payload)
         self.notify.fire(project_id, event, payload)
 
         # 自动缺陷（项目配置开启时，把失败用例转成缺陷）
-        project = self.registry.store("projects").get(project_id)
-        if project and project.get("auto_create_defects"):
-            failures = store.results(build_id, where=[("status", "in", ["failed", "error", "timeout"])])
+        if project.get("auto_create_defects"):
             for fr in failures[:20]:
                 self.defects.create_from_case(project_id, fr, build_id)
 
@@ -278,6 +288,11 @@ class Scheduler:
         while not self._stop_event.is_set():
             try:
                 self._scan_schedules()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                # 补发静默结束的合并通知、到期的失败重试
+                self.notify.flush_due()
             except Exception:  # noqa: BLE001
                 pass
             self._stop_event.wait(self.tick_seconds)

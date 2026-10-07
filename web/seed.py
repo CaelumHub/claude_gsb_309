@@ -132,6 +132,23 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "name": "CI Webhook",
         "config": {"url": "https://example.com/hooks/ci"},
         "events": ["build.finished", "build.failed"],
+        "quiet_hours": {"enabled": True, "start": "22:00", "end": "08:00"},
+    })
+    notify_mgr.create(pid, {
+        "type": "dingtalk",
+        "name": "值班钉钉群",
+        "config": {"url": "https://oapi.dingtalk.com/robot/send?access_token=demo"},
+        "events": ["build.failed"],
+        "templates": {
+            "build.failed": {
+                "title": "🚨 值班关注：${project_name} 构建挂了（${pass_rate}%）",
+                "body": "### 🚨 构建失败\n\n"
+                        "- 项目：${project_name}\n"
+                        "- 失败用例：${failed_cases}\n"
+                        "- 环境：${env_name}\n"
+                        "- 构建：${build_id}",
+            },
+        },
     })
     notify_mgr.create(pid, {
         "type": "email",

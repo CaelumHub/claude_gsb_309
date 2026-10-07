@@ -264,9 +264,181 @@ class TestNotify(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             reg = StoreRegistry(os.path.join(d, "store"))
             mgr = NotificationManager(reg)
-            integration = mgr.create("p1", {"type": "webhook", "config": {}})
+            integration = mgr.create("p1", {"type": "webhook", "config": {},
+                                            "max_attempts": 1})
             result = mgr.send_test(integration["id"])
             self.assertEqual(result["status"], "failed")
+            self.assertEqual(len(result["attempts"]), 1)
+
+    def test_render_template_placeholders(self):
+        from engine.notify import render_template
+        out, missing = render_template(
+            "${project_name} ${pass_rate}%", {"project_name": "P", "pass_rate": 90})
+        self.assertEqual(out, "P 90%")
+        self.assertEqual(missing, [])
+        out, missing = render_template("${project_name} ${unknown}", {"project_name": "P"})
+        self.assertEqual(out, "P ${unknown}")
+        self.assertEqual(missing, ["unknown"])
+
+    def test_per_channel_templates(self):
+        """同一事件发往多个渠道，每个渠道使用各自的默认模板。"""
+        from engine.notify import build_context
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            wb = mgr.create("p1", {"type": "webhook", "config": {"url": "http://x"},
+                                   "events": ["build.failed"]})
+            sl = mgr.create("p1", {"type": "slack", "config": {"url": "http://s"},
+                                   "events": ["build.failed"]})
+            ctx = build_context("build.failed", {"project_name": "Proj", "build_id": "b1"})
+            w_title = mgr.get_template(wb, "build.failed")["title"]
+            s_title = mgr.get_template(sl, "build.failed")["title"]
+            self.assertIn("CI", w_title)
+            self.assertIn(":x:", s_title)
+            self.assertNotEqual(w_title, s_title)
+            # 自定义模板覆盖默认
+            mgr.update(sl["id"], {"templates": {"build.failed": {
+                "title": "自定义 ${project_name}", "body": "b"}}})
+            rec = mgr.fire("p1", "build.failed", {"project_name": "Proj", "build_id": "b9"})
+            sl_rec = [r for r in rec if r["integration_id"] == sl["id"]][0]
+            self.assertEqual(sl_rec["title"], "自定义 Proj")
+
+    def test_quiet_hours_enqueue_and_digest(self):
+        from engine.notify import is_quiet, next_quiet_end
+        qh = {"enabled": True, "start": "22:00", "end": "08:00"}
+        self.assertTrue(is_quiet(qh, datetime.datetime(2026, 10, 7, 3, 0)))
+        self.assertTrue(is_quiet(qh, datetime.datetime(2026, 10, 7, 23, 0)))
+        self.assertFalse(is_quiet(qh, datetime.datetime(2026, 10, 7, 10, 0)))
+        end = next_quiet_end(qh, datetime.datetime(2026, 10, 7, 3, 0))
+        self.assertEqual(datetime.datetime.fromtimestamp(end).hour, 8)
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            mgr.create("p1", {"type": "webhook", "config": {"url": "http://x"},
+                              "events": ["build.finished"], "quiet_hours": qh})
+            # 凌晨 3 点：入队，不投递
+            t3 = datetime.datetime(2026, 10, 7, 3, 0).timestamp()
+            recs = mgr.fire("p1", "build.finished",
+                            {"build_id": "b1", "project_name": "P"}, at=t3)
+            self.assertEqual(recs[0]["status"], "queued")
+            self.assertEqual(mgr.pending_summary(at=t3)["queued"], 1)
+            # 静默未结束：flush 不补发
+            r = mgr.flush_due(at=t3 + 60)
+            self.assertEqual(r["digests"], [])
+            # 又来一条，静默期内合并
+            t5 = datetime.datetime(2026, 10, 7, 5, 0).timestamp()
+            mgr.fire("p1", "build.finished", {"build_id": "b2"}, at=t5)
+            # 8 点后：合并成一条 digest
+            t8 = datetime.datetime(2026, 10, 7, 8, 0).timestamp()
+            r = mgr.flush_due(at=t8)
+            self.assertEqual(len(r["digests"]), 1)
+            digest = reg.store("notify_events").get(r["digests"][0])
+            self.assertEqual(digest["event"], "digest")
+            self.assertEqual(digest["status"], "delivered")
+            self.assertEqual(digest["payload"]["count"], 2)
+            self.assertIn("2 条通知", digest["title"])
+            self.assertEqual(digest["payload"]["build_ids"], ["b1", "b2"])
+            # 原始两条事件都标记为已合并补发
+            statuses = sorted(e["status"] for e in mgr.events("p1") if e["event"] == "build.finished")
+            self.assertEqual(statuses, ["digested", "digested"])
+
+    def test_force_flush_during_quiet(self):
+        qh = {"enabled": True, "start": "22:00", "end": "08:00"}
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            mgr.create("p1", {"type": "webhook", "config": {"url": "http://x"},
+                              "events": ["build.finished"], "quiet_hours": qh})
+            t3 = datetime.datetime(2026, 10, 7, 3, 0).timestamp()
+            mgr.fire("p1", "build.finished", {"build_id": "b1"}, at=t3)
+            r = mgr.flush_project("p1", force=True, at=t3 + 10)
+            self.assertEqual(len(r["digests"]), 1)
+
+    def test_retry_flow(self):
+        """失败投递自动重试，每次尝试留痕；手动重试可再试。"""
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            # 未配置目标 → 确定性失败
+            mgr.create("p1", {"type": "webhook", "config": {},
+                              "events": ["build.finished"], "max_attempts": 3})
+            base = datetime.datetime(2026, 10, 7, 10, 0).timestamp()
+            recs = mgr.fire("p1", "build.finished", {"build_id": "b1"}, at=base)
+            rec = recs[0]
+            self.assertEqual(rec["status"], "retrying")
+            self.assertEqual(len(rec["attempts"]), 1)
+            self.assertIsNotNone(rec["next_retry_at"])
+            # 退避时间未到：不重试
+            self.assertEqual(mgr.flush_due(at=base + 10)["retries"], [])
+            # 到期后第 2 次仍失败
+            r2 = mgr.flush_due(at=base + 40)
+            self.assertEqual(len(r2["retries"]), 1)
+            rec = reg.store("notify_events").get(rec["id"])
+            self.assertEqual(rec["status"], "retrying")
+            self.assertEqual(len(rec["attempts"]), 2)
+            # 第 3 次（上限）失败 → 最终失败
+            r3 = mgr.flush_due(at=base + 400)
+            self.assertEqual(len(r3["retries"]), 1)
+            rec = reg.store("notify_events").get(rec["id"])
+            self.assertEqual(rec["status"], "failed")
+            self.assertEqual(len(rec["attempts"]), 3)
+            self.assertTrue(all(a["status"] == "failed" for a in rec["attempts"]))
+            self.assertTrue(all(a["error"] for a in rec["attempts"]))
+            # 手动再试一次，仍然失败，但尝试次数 +1
+            again = mgr.retry_event(rec["id"])
+            self.assertEqual(again["status"], "failed")
+            self.assertEqual(len(again["attempts"]), 4)
+
+    def test_digest_retry_then_success(self):
+        """合并补发本身失败时，digest 走重试，静默项在成功后才标记 sent。"""
+        qh = {"enabled": True, "start": "22:00", "end": "08:00"}
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            mgr.create("p1", {"type": "webhook", "config": {},  # 目标缺失 → 失败
+                              "events": ["build.finished"], "quiet_hours": qh})
+            t3 = datetime.datetime(2026, 10, 7, 3, 0).timestamp()
+            mgr.fire("p1", "build.finished", {"build_id": "b1"}, at=t3)
+            r = mgr.flush_due(at=datetime.datetime(2026, 10, 7, 8, 0).timestamp())
+            digest = reg.store("notify_events").get(r["digests"][0])
+            self.assertEqual(digest["status"], "retrying")
+            # 静默项保持 sending，不会被二次合并
+            quiet = reg.store("notify_queue").all()
+            self.assertTrue(all(q["status"] == "sending" for q in quiet if q["kind"] == "quiet"))
+            # 配好目标后，重试成功
+            integration = mgr.list("p1")[0]
+            mgr.update(integration["id"], {"config": {"url": "http://now-ok"}})
+            r2 = mgr.flush_due(at=datetime.datetime(2026, 10, 7, 8, 10).timestamp())
+            self.assertEqual(len(r2["retries"]), 1)
+            digest = reg.store("notify_events").get(digest["id"])
+            self.assertEqual(digest["status"], "delivered")
+            quiet = reg.store("notify_queue").all()
+            self.assertTrue(all(q["status"] == "sent" for q in quiet if q["kind"] == "quiet"))
+
+    def test_preview(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            r = mgr.preview("slack", "build.failed",
+                            "构建挂了 ${project_name}", "通过率 ${pass_rate}%")
+            self.assertIn("演示项目", r["title"])
+            self.assertEqual(r["missing"], [])
+            r2 = mgr.preview("webhook", "build.finished", "${no_such_field}", "b")
+            self.assertIn("no_such_field", r2["missing"])
+
+    def test_quiet_hours_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = StoreRegistry(os.path.join(d, "store"))
+            mgr = NotificationManager(reg)
+            with self.assertRaises(ValueError):
+                mgr.create("p1", {"quiet_hours": {"enabled": True,
+                                                  "start": "25:00", "end": "08:00"}})
+            with self.assertRaises(ValueError):
+                mgr.create("p1", {"quiet_hours": {"enabled": True,
+                                                  "start": "08:00", "end": "08:00"}})
+            with self.assertRaises(ValueError):
+                mgr.create("p1", {"max_attempts": 9})
 
 
 if __name__ == "__main__":

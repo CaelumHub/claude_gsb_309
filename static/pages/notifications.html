@@ -7,7 +7,22 @@
   <link rel="stylesheet" href="/static/css/style.css">
   <style>
     .int-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
-    .evt { font-size: 13px; padding: 7px 4px; border-bottom: 1px solid var(--border); }
+    .evt { font-size: 13px; padding: 8px 4px; border-bottom: 1px solid var(--border); }
+    .evt-detail { margin-top: 8px; padding: 8px 10px; background: var(--surface-2); border-radius: 7px; font-size: 12px; }
+    .evt-detail pre { white-space: pre-wrap; word-break: break-word; margin: 4px 0; font-family: var(--mono); }
+    .tpl-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+    .tpl-tabs button { padding: 5px 12px; font-size: 13px; border-radius: 7px; border: 1px solid var(--border);
+      background: var(--surface-2); cursor: pointer; }
+    .tpl-tabs button.active { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+    .preview-box { background: var(--surface-2); border: 1px dashed var(--border); border-radius: 7px;
+      padding: 10px 12px; font-size: 13px; margin-top: 10px; }
+    .preview-box pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; font-family: var(--mono); font-size: 12px; }
+    .ph-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+    .ph-chips code { background: var(--primary-soft); color: var(--primary); border-radius: 5px;
+      padding: 1px 7px; font-size: 12px; cursor: pointer; }
+    .attempt-line { padding: 3px 0; border-bottom: 1px dashed var(--border); }
+    textarea { width: 100%; box-sizing: border-box; }
+    input[type="time"] { max-width: 120px; }
   </style>
 </head>
 <body>
@@ -16,13 +31,15 @@
 
   <main class="main">
     <h1 class="page-title">通知与集成</h1>
-    <p class="page-desc">配置 Webhook / Slack / Email / 钉钉 集成，构建结束时自动通知并记录投递日志。</p>
+    <p class="page-desc">为不同渠道配置消息模板与静默时段；夜间通知合并补发，失败自动重试、全程留痕。</p>
 
     <div class="card">
       <div class="row">
         <label style="margin:0 6px 0 0;align-self:center">项目</label>
         <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
         <span style="flex:1"></span>
+        <span id="queue-summary" class="muted" style="font-size:13px"></span>
+        <button class="btn small secondary" id="btn-flush">立即补发</button>
         <button class="btn" id="btn-new">新建集成</button>
       </div>
     </div>
@@ -52,11 +69,45 @@
             <label style="font-weight:400;color:var(--text);display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="evt-chk" value="build.failed" style="width:auto"> 构建失败</label>
           </div>
         </div>
+
+        <div class="mt">
+          <label style="display:inline-flex;gap:6px;font-weight:600;color:var(--text);align-items:center">
+            <input type="checkbox" id="i-quiet-enabled" style="width:auto"> 静默时段（该时段内不打扰，结束后合并补发）
+          </label>
+          <div class="row mt" style="gap:8px">
+            <input type="time" id="i-quiet-start" value="22:00">
+            <span class="muted">至</span>
+            <input type="time" id="i-quiet-end" value="08:00">
+            <span class="muted" style="font-size:12px">支持跨午夜，如 22:00 → 08:00</span>
+          </div>
+        </div>
+
+        <div class="mt">
+          <label>失败自动重试次数上限（含首次投递，1~5）</label>
+          <input type="number" id="i-max-attempts" value="3" min="1" max="5" style="max-width:120px">
+        </div>
+
         <div class="mt">
           <label style="display:inline-flex;gap:6px;font-weight:400;color:var(--text);align-items:center">
             <input type="checkbox" id="i-enabled" checked style="width:auto"> 启用
           </label>
         </div>
+
+        <div class="mt">
+          <label>消息模板（每个渠道使用各自的模板，留空则用该渠道默认模板）</label>
+          <div class="tpl-tabs mt" id="tpl-tabs"></div>
+          <label id="t-title-label">标题</label>
+          <input type="text" id="i-tpl-title" placeholder="留空使用默认标题">
+          <label class="mt">正文（支持多行）</label>
+          <textarea id="i-tpl-body" rows="6" class="mono" placeholder="留空使用默认正文"></textarea>
+          <div class="ph-chips" id="ph-chips"></div>
+          <div class="row mt">
+            <button class="btn small secondary" id="btn-tpl-default">填入默认模板</button>
+            <button class="btn small secondary" id="btn-tpl-preview">预览</button>
+          </div>
+          <div class="preview-box" id="tpl-preview" style="display:none"></div>
+        </div>
+
         <div class="row mt">
           <button class="btn" id="btn-save">保存</button>
           <button class="btn secondary" id="btn-cancel">取消</button>
@@ -65,7 +116,7 @@
     </div>
 
     <section class="card">
-      <h2>投递事件日志</h2>
+      <h2>投递事件日志（含静默排队、重试与补发留痕）</h2>
       <div id="event-list"><div class="empty">加载中…</div></div>
     </section>
   </main>
@@ -76,56 +127,160 @@
 renderNav("notifications");
 
 const TYPE_LABELS = { webhook: "Webhook", slack: "Slack", email: "Email", dingtalk: "钉钉" };
+const STATUS_BADGE = {
+  pending: "pending", delivered: "ok", failed: "error", queued: "pending",
+  retrying: "timeout", digested: "blue", expired: "cancelled", cancelled: "cancelled",
+};
+const STATUS_LABEL = {
+  pending: "待投递", delivered: "已送达", failed: "最终失败", queued: "静默排队",
+  retrying: "等待重试", digested: "已合并补发", expired: "已过期", cancelled: "已取消",
+};
 let projectId = null;
 let integrations = [];
 let editingId = null;
+let placeholders = [];
+let defaultTemplates = {};
+let curTplEvent = "build.finished";
+// 编辑中三个事件的模板草稿
+let tplDraft = {
+  "build.finished": { title: "", body: "" },
+  "build.passed": { title: "", body: "" },
+  "build.failed": { title: "", body: "" },
+};
 
 async function init() {
+  const meta = await api("/api/notify/placeholders");
+  placeholders = meta.placeholders || [];
+  defaultTemplates = meta.default_templates || {};
+  $("#ph-chips").innerHTML = placeholders
+    .map(p => `<code title="${esc(p.label)}，示例：${esc(String(p.example))}" onclick="insertPh('${p.name}')">\${${p.name}}</code>`).join("");
+
   const params = new URLSearchParams(location.search);
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
-  await refresh();
+  if (projectId) await refresh();
 }
 
 async function switchProject(id) { projectId = id; editingId = null; await refresh(); }
-
 async function refresh() { await Promise.all([loadIntegrations(), loadEvents()]); }
 
+/* ---------------- 集成列表 ---------------- */
 async function loadIntegrations() {
   const d = await api(`/api/projects/${projectId}/integrations`);
   integrations = d.integrations || [];
+  renderQueueSummary(d);
   const host = $("#int-list");
   if (!integrations.length) { host.innerHTML = '<div class="empty">还没有集成，点击「新建集成」。</div>'; return; }
-  host.innerHTML = integrations.map(x => `
+  host.innerHTML = integrations.map(x => {
+    const q = x.quiet_hours || {};
+    const tplCount = Object.keys(x.templates || {}).length;
+    return `
     <div class="int-item">
       <div class="row spread">
         <div class="row"><span class="badge violet">${esc(TYPE_LABELS[x.type]||x.type)}</span><strong>${esc(x.name)}</strong>
-          <span class="badge ${x.enabled?'blue':'pending'}">${x.enabled?'启用':'停用'}</span></div>
+          <span class="badge ${x.enabled?'blue':'pending'}">${x.enabled?'启用':'停用'}</span>
+          ${q.enabled ? `<span class="badge timeout">静默 ${esc(q.start)}-${esc(q.end)}</span>` : ""}
+          ${tplCount ? `<span class="tag">自定义模板 ×${tplCount}</span>` : `<span class="tag">默认模板</span>`}
+        </div>
         <div class="row">
-          <button class="btn small secondary" onclick="test('${x.id}')">测试</button>
+          <button class="btn small secondary" onclick="testInt('${x.id}')">测试</button>
+          <button class="btn small secondary" onclick="flushInt('${x.id}')">立即补发</button>
           <button class="btn small secondary" onclick="toggle('${x.id}', ${!x.enabled})">${x.enabled?'停用':'启用'}</button>
           <button class="btn small secondary" onclick="editInt('${x.id}')">编辑</button>
           <button class="btn small danger" onclick="delInt('${x.id}')">删除</button>
         </div>
       </div>
       <div class="mt muted" style="font-size:13px">目标: ${esc((x.config||{}).url||(x.config||{}).address||(x.config||{}).channel||"未配置")}</div>
-      <div class="mt" style="font-size:12px">${(x.events||[]).map(e => `<span class="tag">${esc(e)}</span>`).join("")}</div>
-    </div>`).join("");
+      <div class="mt" style="font-size:12px">${(x.events||[]).map(e => `<span class="tag">${esc(e)}</span>`).join("")}
+        <span class="muted">· 最多投递 ${x.max_attempts || 3} 次</span></div>
+    </div>`;
+  }).join("");
 }
 
+function renderQueueSummary(d) {
+  const parts = [];
+  if (d.queued) parts.push(`静默排队 <strong>${d.queued}</strong>`);
+  if (d.retrying) parts.push(`等待重试 <strong>${d.retrying}</strong>`);
+  if (d.due) parts.push(`待补发 <strong>${d.due}</strong>`);
+  $("#queue-summary").innerHTML = parts.length ? parts.join(" · ") : "无积压通知";
+}
+
+/* ---------------- 事件日志 ---------------- */
 async function loadEvents() {
   const d = await api(`/api/projects/${projectId}/events`);
+  renderQueueSummary(d);
   const events = d.events || [];
   const host = $("#event-list");
   if (!events.length) { host.innerHTML = '<div class="empty">暂无投递记录</div>'; return; }
-  host.innerHTML = `<div style="max-height:360px;overflow:auto">` + events.slice(0, 80).map(e => `
-    <div class="evt row spread">
-      <span class="mono" style="font-size:12px">${fmtTime(e.created_at)}</span>
-      <span class="badge ${e.status==='delivered'?'ok':'error'}">${esc(e.status)}</span>
-      <span>${esc(e.integration_name||e.integration_id)} · ${esc(e.event)}</span>
-      <span class="muted" style="font-size:12px">→ ${esc(e.recipient)} (${e.latency_ms}ms)</span>
+  host.innerHTML = `<div style="max-height:480px;overflow:auto">` + events.slice(0, 100).map(e => {
+    const b = STATUS_BADGE[e.status] || "pending";
+    const canRetry = (e.status === "failed" || e.status === "retrying");
+    const retryInfo = e.status === "retrying" && e.next_retry_at
+      ? `<span class="muted">下次重试 ${fmtTime(e.next_retry_at)}</span>` : "";
+    return `
+    <div class="evt">
+      <div class="row spread">
+        <div class="row" style="gap:8px">
+          <span class="mono muted" style="font-size:12px">${fmtTime(e.created_at)}</span>
+          <span class="badge ${b}">${esc(STATUS_LABEL[e.status] || e.status)}</span>
+          <strong>${esc(e.integration_name||e.integration_id)}</strong>
+          <span class="tag">${esc(e.event)}</span>
+          ${retryInfo}
+        </div>
+        <div class="row">
+          <span class="muted" style="font-size:12px">第 ${e.attempt || 0}/${e.max_attempts||3} 次 · ${e.latency_ms != null ? e.latency_ms+"ms" : "—"}</span>
+          ${canRetry ? `<button class="btn small secondary" onclick="retryEvt('${e.id}')">重试</button>` : ""}
+          <button class="btn small secondary" onclick="toggleDetail('${e.id}')">详情</button>
+        </div>
+      </div>
+      <div class="evt-detail" id="detail-${e.id}" style="display:none">
+        <strong>${esc(e.title || "(无标题)")}</strong>
+        <pre>${esc(e.body || "(无正文)")}</pre>
+        <div class="muted">→ ${esc(e.recipient || "—")}</div>
+        ${attemptsHtml(e)}
+      </div>
+    </div>`;
+  }).join("") + "</div>";
+}
+
+function attemptsHtml(e) {
+  const a = e.attempts || [];
+  if (!a.length) return '<div class="muted mt">尚无投递尝试</div>';
+  return '<div class="mt"><div class="muted">投递尝试：</div>' + a.map(x => `
+    <div class="attempt-line">
+      <span class="mono muted">${fmtTime(x.at)}</span>
+      第 ${x.attempt} 次 · <span class="badge ${x.status==='delivered'?'ok':'error'}">${x.status==='delivered'?'成功':'失败'}</span>
+      ${x.latency_ms != null ? esc(x.latency_ms)+"ms" : ""}
+      <span class="muted">${esc(reasonLabel(x.reason))}</span>
+      ${x.error ? `<span style="color:var(--red)">${esc(x.error)}</span>` : ""}
     </div>`).join("") + "</div>";
 }
 
+function reasonLabel(r) {
+  return { dispatch: "实时投递", auto_retry: "自动重试", manual_retry: "手动重试",
+    manual_test: "测试投递", quiet_digest: "静默合并补发" }[r] || r || "";
+}
+
+function toggleDetail(id) {
+  const el = $(`#detail-${id}`);
+  el.style.display = el.style.display === "none" ? "block" : "none";
+}
+
+async function retryEvt(id) {
+  try {
+    const r = await api(`/api/events/${id}/retry`, { method: "POST" });
+    toast(r.status === "delivered" ? "重试成功，已送达" : `重试后状态：${STATUS_LABEL[r.status]||r.status}`,
+      r.status === "delivered" ? "ok" : "error");
+  } catch (ex) { toast(ex.message, "error"); }
+  loadEvents();
+}
+
+async function flushInt(id) {
+  await api(`/api/integrations/${id}/flush`, { method: "POST", body: { force: true } });
+  toast("已立即补发");
+  refresh();
+}
+
+/* ---------------- 编辑器 ---------------- */
 function typeChanged() {
   const t = $("#i-type").value;
   const map = { webhook: ["URL", "https://example.com/hooks/ci"],
@@ -134,16 +289,78 @@ function typeChanged() {
     dingtalk: ["机器人 Webhook", "https://oapi.dingtalk.com/robot/send?access_token=..."] };
   $("#i-target-label").textContent = map[t][0];
   $("#i-target").placeholder = map[t][1];
-  $("#i-name").value = $("#i-name").value || TYPE_LABELS[t];
+  if (!$("#i-name").value) $("#i-name").value = TYPE_LABELS[t];
+  renderTplTabs();
 }
 
-function newInt() {
-  editingId = null;
+function insertPh(name) {
+  const ta = $("#i-tpl-body");
+  const token = "${" + name + "}";
+  const start = ta.selectionStart ?? ta.value.length;
+  ta.value = ta.value.slice(0, start) + token + ta.value.slice(ta.selectionEnd ?? start);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = start + token.length;
+  syncDraft();
+}
+
+function renderTplTabs() {
+  $("#tpl-tabs").innerHTML = ["build.finished", "build.passed", "build.failed"].map(ev =>
+    `<button class="${ev===curTplEvent?'active':''}" onclick="switchTpl('${ev}')">${esc({
+      "build.finished":"构建结束","build.passed":"构建成功","build.failed":"构建失败"}[ev])}</button>`).join("");
+  const d = tplDraft[curTplEvent] || { title: "", body: "" };
+  $("#i-tpl-title").value = d.title || "";
+  $("#i-tpl-body").value = d.body || "";
+  $("#tpl-preview").style.display = "none";
+}
+
+function switchTpl(ev) {
+  syncDraft();
+  curTplEvent = ev;
+  renderTplTabs();
+}
+
+function syncDraft() {
+  tplDraft[curTplEvent] = { title: $("#i-tpl-title").value, body: $("#i-tpl-body").value };
+}
+
+function fillDefaultTpl() {
+  syncDraft();
+  const t = $("#i-type").value;
+  const d = (defaultTemplates[t] && defaultTemplates[t][curTplEvent]) || { title: "", body: "" };
+  $("#i-tpl-title").value = d.title || "";
+  $("#i-tpl-body").value = d.body || "";
+  syncDraft();
+}
+
+async function previewTpl() {
+  syncDraft();
+  const d = tplDraft[curTplEvent];
+  const r = await api("/api/notify/preview", { method: "POST", body: {
+    type: $("#i-type").value, event: curTplEvent, title: d.title || null, body: d.body || null } });
+  const box = $("#tpl-preview");
+  box.style.display = "block";
+  box.innerHTML = `<strong>标题预览</strong><pre>${esc(r.title)}</pre>
+    <strong>正文预览</strong><pre>${esc(r.body)}</pre>
+    ${r.missing.length ? `<span style="color:var(--amber)">未解析占位符（示例数据中无此字段，实际构建时通常有值）：${r.missing.map(esc).join(", ")}</span>`
+      : '<span style="color:var(--green)">所有占位符均已解析</span>'}`;
+}
+
+function resetForm() {
   $("#edit-title").textContent = "新建集成";
-  $("#i-type").value = "webhook"; $("#i-name").value = ""; $("#i-enabled").checked = true;
+  $("#i-type").value = "webhook"; $("#i-name").value = ""; $("#i-target").value = "";
+  $("#i-enabled").checked = true;
+  $("#i-quiet-enabled").checked = false;
+  $("#i-quiet-start").value = "22:00"; $("#i-quiet-end").value = "08:00";
+  $("#i-max-attempts").value = 3;
   $$(".evt-chk").forEach(c => c.checked = c.value === "build.finished");
+  tplDraft = { "build.finished": { title: "", body: "" }, "build.passed": { title: "", body: "" },
+    "build.failed": { title: "", body: "" } };
+  curTplEvent = "build.finished";
+  $("#tpl-preview").style.display = "none";
   typeChanged();
 }
+
+function newInt() { editingId = null; resetForm(); }
 
 function editInt(id) {
   const x = integrations.find(v => v.id === id);
@@ -154,6 +371,15 @@ function editInt(id) {
   const target = (x.config||{}).url || (x.config||{}).address || (x.config||{}).channel || "";
   $("#i-target").value = target;
   $$(".evt-chk").forEach(c => c.checked = (x.events||[]).includes(c.value));
+  const q = x.quiet_hours || {};
+  $("#i-quiet-enabled").checked = !!q.enabled;
+  $("#i-quiet-start").value = q.start || "22:00";
+  $("#i-quiet-end").value = q.end || "08:00";
+  $("#i-max-attempts").value = x.max_attempts || 3;
+  tplDraft = { "build.finished": { title: "", body: "" }, "build.passed": { title: "", body: "" },
+    "build.failed": { title: "", body: "" } };
+  Object.entries(x.templates || {}).forEach(([ev, t]) => { tplDraft[ev] = { title: t.title || "", body: t.body || "" }; });
+  curTplEvent = "build.finished";
   typeChanged();
 }
 
@@ -164,35 +390,57 @@ async function toggle(id, enabled) {
 }
 
 async function delInt(id) {
-  if (!confirm("确认删除该集成？")) return;
+  if (!confirm("确认删除该集成？静默队列中未发出的消息将标记过期。")) return;
   await api(`/api/integrations/${id}`, { method: "DELETE" });
   toast("已删除");
   refresh();
 }
 
-async function test(id) {
+async function testInt(id) {
   const r = await api(`/api/integrations/${id}/test`, { method: "POST" });
-  toast(`测试投递: ${r.status} (${r.latency_ms}ms)`, r.status === "delivered" ? "ok" : "error");
+  toast(`测试投递: ${r.status==='delivered'?'已送达':'失败'}（第 ${r.attempt} 次）`,
+    r.status === "delivered" ? "ok" : "error");
   loadEvents();
 }
 
 $("#btn-new").onclick = newInt;
-$("#btn-cancel").onclick = () => { editingId = null; };
+$("#btn-cancel").onclick = () => { editingId = null; resetForm(); };
+$("#btn-tpl-default").onclick = fillDefaultTpl;
+$("#btn-tpl-preview").onclick = previewTpl;
+$("#i-tpl-title").addEventListener("input", syncDraft);
+$("#i-tpl-body").addEventListener("input", syncDraft);
+
+$("#btn-flush").onclick = async () => {
+  if (!confirm("立即补发该项目全部静默积压通知？（无视静默结束时间）")) return;
+  await api(`/api/projects/${projectId}/flush`, { method: "POST", body: { force: true } });
+  toast("已补发");
+  refresh();
+};
 
 $("#btn-save").onclick = async () => {
+  syncDraft();
   const type = $("#i-type").value;
   const target = $("#i-target").value.trim();
-  const config = type === "email" ? { address: target } : type === "slack" ? { url: target }
-    : type === "dingtalk" ? { url: target } : { url: target };
-  const body = { type, name: $("#i-name").value || TYPE_LABELS[type], enabled: $("#i-enabled").checked,
-    config, events: $$(".evt-chk").filter(c => c.checked).map(c => c.value) };
-  if (editingId) {
-    await api(`/api/integrations/${editingId}`, { method: "PUT", body });
-    toast("已保存");
-  } else {
-    await api(`/api/projects/${projectId}/integrations`, { method: "POST", body });
-    toast("已创建");
-  }
+  const config = type === "email" ? { address: target } : { url: target };
+  const templates = {};
+  Object.entries(tplDraft).forEach(([ev, t]) => {
+    if ((t.title || "").trim() || (t.body || "").trim()) templates[ev] = t;
+  });
+  const body = {
+    type, name: $("#i-name").value || TYPE_LABELS[type], enabled: $("#i-enabled").checked,
+    config, events: $$(".evt-chk").filter(c => c.checked).map(c => c.value),
+    quiet_hours: {
+      enabled: $("#i-quiet-enabled").checked,
+      start: $("#i-quiet-start").value || "22:00",
+      end: $("#i-quiet-end").value || "08:00",
+    },
+    max_attempts: parseInt($("#i-max-attempts").value || "3", 10),
+    templates,
+  };
+  try {
+    if (editingId) { await api(`/api/integrations/${editingId}`, { method: "PUT", body }); toast("已保存"); }
+    else { await api(`/api/projects/${projectId}/integrations`, { method: "POST", body }); toast("已创建"); }
+  } catch (ex) { toast(ex.message, "error"); return; }
   refresh();
 };
 

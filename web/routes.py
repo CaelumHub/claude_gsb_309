@@ -649,13 +649,18 @@ def cron_describe():
 
 @api.get("/projects/<project_id>/integrations")
 def list_integrations(project_id: str):
-    return jsonify({"integrations": _notify().list(project_id)})
+    data = {"integrations": _notify().list(project_id)}
+    data.update(_notify().pending_summary(project_id))
+    return jsonify(data)
 
 
 @api.post("/projects/<project_id>/integrations")
 def create_integration(project_id: str):
     data = _payload()
-    return jsonify(_notify().create(project_id, data))
+    try:
+        return jsonify(_notify().create(project_id, data))
+    except ValueError as exc:
+        return _err(str(exc))
 
 
 @api.put("/integrations/<integration_id>")
@@ -664,9 +669,13 @@ def update_integration(integration_id: str):
     if integration is None:
         return _err("集成不存在", 404)
     data = _payload()
-    patch = {k: data[k] for k in ("name", "type", "enabled", "config", "events")
+    patch = {k: data[k] for k in ("name", "type", "enabled", "config", "events",
+                                  "templates", "quiet_hours", "max_attempts")
              if k in data}
-    return jsonify(_notify().update(integration_id, patch))
+    try:
+        return jsonify(_notify().update(integration_id, patch))
+    except ValueError as exc:
+        return _err(str(exc))
 
 
 @api.delete("/integrations/<integration_id>")
@@ -683,9 +692,69 @@ def test_integration(integration_id: str):
     return jsonify(result)
 
 
+@api.post("/integrations/<integration_id>/flush")
+def flush_integration(integration_id: str):
+    """立即强制补发该集成静默积压的通知。"""
+    notify = _notify()
+    if notify.get(integration_id) is None:
+        return _err("集成不存在", 404)
+    force = (_payload() or {}).get("force", True)
+    return jsonify(notify.flush_integration(integration_id, force=bool(force)))
+
+
 @api.get("/projects/<project_id>/events")
 def list_events(project_id: str):
-    return jsonify({"events": _notify().events(project_id)})
+    data = {"events": _notify().events(project_id)}
+    data.update(_notify().pending_summary(project_id))
+    return jsonify(data)
+
+
+@api.get("/projects/<project_id>/queue")
+def list_queue(project_id: str):
+    return jsonify({"items": _notify().queue(project_id)})
+
+
+@api.post("/projects/<project_id>/flush")
+def flush_project(project_id: str):
+    """补发项目积压；body 传 ``{"force": true}`` 可无视静默结束时间立即补发。"""
+    force = bool((_payload() or {}).get("force", False))
+    return jsonify(_notify().flush_project(project_id, force=force))
+
+
+@api.post("/events/<event_id>/retry")
+def retry_event(event_id: str):
+    """对投递失败 / 重试中的通知立即再试一次（手动重试，全程留痕）。"""
+    result = _notify().retry_event(event_id)
+    if result.get("error"):
+        return _err(result["error"])
+    return jsonify(result)
+
+
+@api.get("/notify/placeholders")
+def notify_placeholders():
+    """模板可用占位符目录（前端编辑提示用）。"""
+    from engine.notify import EVENTS, EVENT_LABELS, PLACEHOLDERS, DEFAULT_TEMPLATES
+    return jsonify({
+        "placeholders": PLACEHOLDERS,
+        "events": [{"name": e, "label": EVENT_LABELS[e]} for e in EVENTS],
+        "default_templates": DEFAULT_TEMPLATES,
+    })
+
+
+@api.post("/notify/preview")
+def notify_preview():
+    """用示例数据（可携带自定义 payload）渲染模板预览。"""
+    data = _payload()
+    try:
+        return jsonify(_notify().preview(
+            data.get("type", "webhook"),
+            data.get("event", "build.finished"),
+            data.get("title"),
+            data.get("body"),
+            data.get("payload"),
+        ))
+    except ValueError as exc:
+        return _err(str(exc))
 
 
 # ---------------------------------------------------------------------------
