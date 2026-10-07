@@ -1,0 +1,8 @@
+{
+  "name": "notify_queue",
+  "shard_size": 200,
+  "shard_count": 0,
+  "total": 0,
+  "next_id": 1,
+  "created_at": 1791373092.9581978
+}

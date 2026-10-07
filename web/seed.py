@@ -132,6 +132,13 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "name": "CI Webhook",
         "config": {"url": "https://example.com/hooks/ci"},
         "events": ["build.finished", "build.failed"],
+        "templates": {
+            "build.failed": {
+                "title": "[紧急] 构建失败 · ${project_name}",
+                "body": ("${build_id} 失败，通过率 ${pass_rate}%\n"
+                         "失败用例：\n${failed_cases}\n请值班同学尽快处理。"),
+            },
+        },
     })
     notify_mgr.create(pid, {
         "type": "email",
@@ -139,5 +146,14 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "config": {"address": "qa@example.com"},
         "events": ["build.failed"],
     })
+
+    # 夜间静默：22:00–08:00 不打扰，积压消息次日 8 点合并补发；周末全天静默
+    try:
+        notify_mgr.save_settings(pid, {
+            "enabled": True, "start": "22:00", "end": "08:00",
+            "weekend": True,
+        })
+    except ValueError:
+        pass
 
     return {"project": proj, "env_id": env["id"], "suite_id": suite["id"]}

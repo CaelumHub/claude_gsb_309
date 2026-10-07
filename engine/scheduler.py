@@ -254,22 +254,27 @@ class Scheduler:
 
         # 通知
         event = "build.passed" if build["status"] == "passed" else "build.failed"
+        project = self.registry.store("projects").get(project_id)
+        failures = store.results(
+            build_id, where=[("status", "in", ["failed", "error", "timeout"])])
+        failed_names = [f.get("case_name") or f.get("case_id") or "未命名用例"
+                        for f in failures]
         payload = {
             "build_id": build_id,
             "project_id": project_id,
+            "project_name": (project or {}).get("name", project_id),
             "status": build["status"],
             "passed": passed,
             "total": total,
             "pass_rate": round(passed_ratio * 100, 1),
-            "duration": build.get("duration", 0.0),
+            "duration": round(build.get("duration", 0.0), 2),
+            "failed_cases": "\n".join(failed_names) if failed_names else "无",
         }
         self.notify.fire(project_id, "build.finished", payload)
         self.notify.fire(project_id, event, payload)
 
         # 自动缺陷（项目配置开启时，把失败用例转成缺陷）
-        project = self.registry.store("projects").get(project_id)
         if project and project.get("auto_create_defects"):
-            failures = store.results(build_id, where=[("status", "in", ["failed", "error", "timeout"])])
             for fr in failures[:20]:
                 self.defects.create_from_case(project_id, fr, build_id)
 
@@ -278,6 +283,11 @@ class Scheduler:
         while not self._stop_event.is_set():
             try:
                 self._scan_schedules()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                # 静默时段结束时合并补发；投递失败的按退避计划重试
+                self.notify.flush_due()
             except Exception:  # noqa: BLE001
                 pass
             self._stop_event.wait(self.tick_seconds)

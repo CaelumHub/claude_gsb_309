@@ -664,8 +664,8 @@ def update_integration(integration_id: str):
     if integration is None:
         return _err("集成不存在", 404)
     data = _payload()
-    patch = {k: data[k] for k in ("name", "type", "enabled", "config", "events")
-             if k in data}
+    patch = {k: data[k] for k in ("name", "type", "enabled", "config", "events",
+                                  "templates") if k in data}
     return jsonify(_notify().update(integration_id, patch))
 
 
@@ -678,7 +678,7 @@ def delete_integration(integration_id: str):
 @api.post("/integrations/<integration_id>/test")
 def test_integration(integration_id: str):
     result = _notify().send_test(integration_id)
-    if "error" in result:
+    if result.get("error"):
         return _err(result["error"], 404)
     return jsonify(result)
 
@@ -686,6 +686,76 @@ def test_integration(integration_id: str):
 @api.get("/projects/<project_id>/events")
 def list_events(project_id: str):
     return jsonify({"events": _notify().events(project_id)})
+
+
+# -- 消息模板 ---------------------------------------------------------------
+
+@api.get("/notify/templates/defaults")
+def template_defaults():
+    """各渠道 × 各事件的默认模板 + 占位符说明（供前端回退与展示）。"""
+    from engine.notify import DEFAULT_TEMPLATES, EVENT_LABELS, PLACEHOLDERS, TEMPLATE_EVENTS
+    return jsonify({
+        "templates": DEFAULT_TEMPLATES,
+        "placeholders": [{"token": t, "desc": d} for t, d in PLACEHOLDERS],
+        "events": TEMPLATE_EVENTS,
+        "event_labels": EVENT_LABELS,
+    })
+
+
+@api.post("/notify/templates/preview")
+def preview_template():
+    """用样例数据渲染模板（未填字段回退渠道默认模板）。"""
+    data = _payload()
+    result = _notify().render_preview(
+        itype=data.get("type", "webhook"),
+        event=data.get("event", "build.finished"),
+        title=data.get("title", ""),
+        body=data.get("body", ""),
+        context=data.get("context"),
+    )
+    return jsonify(result)
+
+
+# -- 静默时段 ---------------------------------------------------------------
+
+@api.get("/projects/<project_id>/quiet")
+def get_quiet(project_id: str):
+    return jsonify(_notify().settings_state(project_id))
+
+
+@api.put("/projects/<project_id>/quiet")
+def update_quiet(project_id: str):
+    data = _payload()
+    try:
+        _notify().save_settings(project_id, data)
+    except ValueError as exc:
+        return _err(str(exc))
+    return jsonify(_notify().settings_state(project_id))
+
+
+@api.post("/projects/<project_id>/quiet/flush")
+def flush_quiet(project_id: str):
+    """手动触发：立即补发该项目到期的静默消息并重试失败投递。"""
+    result = _notify().flush_due()
+    records = [r for r in result.get("records", [])
+               if r.get("project_id") == project_id]
+    result["records"] = records
+    return jsonify(result)
+
+
+# -- 通知队列与重试 ----------------------------------------------------------
+
+@api.get("/projects/<project_id>/queue")
+def notify_queue(project_id: str):
+    return jsonify({"queue": _notify().queue(project_id)})
+
+
+@api.post("/queue/<queue_id>/retry")
+def retry_queue_item(queue_id: str):
+    result = _notify().retry_item(queue_id)
+    if result.get("error"):
+        return _err(result["error"], 400)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

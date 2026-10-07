@@ -8,6 +8,23 @@
   <style>
     .int-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
     .evt { font-size: 13px; padding: 7px 4px; border-bottom: 1px solid var(--border); }
+    .tpl-box { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; background: var(--surface-2, #f8fafc); }
+    .tpl-box h3 { margin-bottom: 8px; }
+    .tpl-tab { padding: 5px 12px; font-size: 13px; border: 1px solid var(--border); background: #fff; border-radius: 999px; cursor: pointer; }
+    .tpl-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .preview-box { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px 12px; font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+    .preview-box .pv-title { color: #7dd3fc; font-weight: 600; margin-bottom: 6px; }
+    .ph-chip { display:inline-block; font-family: var(--mono); font-size: 11.5px; background: var(--primary-soft); color: var(--blue);
+               border-radius: 6px; padding: 1px 7px; margin: 2px 3px 2px 0; cursor: pointer; }
+    .ph-chip:hover { background: var(--primary); color:#fff; }
+    .quiet-state { font-size: 13px; padding: 8px 12px; border-radius: 8px; margin-top: 10px; }
+    .quiet-state.in { background: #fef3e2; color: var(--amber); }
+    .quiet-state.out { background: #e7f6ec; color: var(--green); }
+    .queue-item { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
+    details.evt-detail summary { cursor: pointer; font-size: 12px; color: var(--text-muted); }
+    .msg-text { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; color: var(--text); margin-top: 6px; }
+    .badge.deferred { background: #fef3e2; color: var(--amber); }
+    .badge.dead { background: #f3e8ff; color: var(--violet); }
   </style>
 </head>
 <body>
@@ -16,7 +33,7 @@
 
   <main class="main">
     <h1 class="page-title">通知与集成</h1>
-    <p class="page-desc">配置 Webhook / Slack / Email / 钉钉 集成，构建结束时自动通知并记录投递日志。</p>
+    <p class="page-desc">为不同渠道定制消息模板，设置夜间静默与合并补发；失败自动重试，全程留痕可查。</p>
 
     <div class="card">
       <div class="row">
@@ -27,6 +44,26 @@
       </div>
     </div>
 
+    <!-- 静默时段 -->
+    <section class="card">
+      <h2>静默时段</h2>
+      <div class="row" style="gap:24px">
+        <label style="font-weight:400;color:var(--text);display:inline-flex;gap:6px;align-items:center">
+          <input type="checkbox" id="q-enabled" style="width:auto"> 启用静默
+        </label>
+        <div class="row" style="gap:6px">
+          每日 <input type="time" id="q-start" value="22:00" style="width:120px">
+          至 <input type="time" id="q-end" value="08:00" style="width:120px">（支持跨午夜）
+        </div>
+        <label style="font-weight:400;color:var(--text);display:inline-flex;gap:6px;align-items:center">
+          <input type="checkbox" id="q-weekend" style="width:auto"> 周末全天静默
+        </label>
+        <button class="btn small" id="btn-save-quiet">保存设置</button>
+        <button class="btn small secondary" id="btn-flush">立即补发 / 重试</button>
+      </div>
+      <div id="quiet-state"></div>
+    </section>
+
     <div class="grid cols-2">
       <section class="card">
         <h2>集成列表</h2>
@@ -36,7 +73,7 @@
       <section class="card" id="edit-card">
         <h2 id="edit-title">新建集成</h2>
         <div class="grid cols-2">
-          <div><label>类型</label><select id="i-type" onchange="typeChanged()">
+          <div><label>类型（渠道）</label><select id="i-type" onchange="typeChanged()">
             <option value="webhook">Webhook</option><option value="slack">Slack</option>
             <option value="email">Email</option><option value="dingtalk">钉钉</option>
           </select></div>
@@ -57,6 +94,24 @@
             <input type="checkbox" id="i-enabled" checked style="width:auto"> 启用
           </label>
         </div>
+
+        <!-- 模板编辑：每个渠道、每个事件一套 title/body -->
+        <div class="tpl-box">
+          <h3>消息模板（该渠道专用，留空用默认模板）</h3>
+          <div class="row" id="tpl-tabs" style="gap:6px"></div>
+          <div class="mt"><label>标题</label><input type="text" id="t-title" class="mono"></div>
+          <div class="mt"><label>正文</label><textarea id="t-body" class="mono" style="min-height:120px"></textarea></div>
+          <div class="mt muted" style="font-size:12px">
+            点击插入占位符：
+            <div id="ph-list" class="mt"></div>
+          </div>
+          <div class="row mt">
+            <button class="btn small" id="btn-preview">预览（样例数据）</button>
+            <button class="btn small secondary" id="btn-reset-tpl">恢复默认</button>
+          </div>
+          <div id="tpl-preview" class="mt" hidden><div class="preview-box"><div class="pv-title" id="pv-title"></div><div id="pv-body"></div></div></div>
+        </div>
+
         <div class="row mt">
           <button class="btn" id="btn-save">保存</button>
           <button class="btn secondary" id="btn-cancel">取消</button>
@@ -64,6 +119,13 @@
       </section>
     </div>
 
+    <!-- 待发 / 重试队列 -->
+    <section class="card">
+      <h2>待补发 / 待重试队列</h2>
+      <div id="queue-list"><div class="empty">加载中…</div></div>
+    </section>
+
+    <!-- 投递事件日志 -->
     <section class="card">
       <h2>投递事件日志</h2>
       <div id="event-list"><div class="empty">加载中…</div></div>
@@ -76,85 +138,282 @@
 renderNav("notifications");
 
 const TYPE_LABELS = { webhook: "Webhook", slack: "Slack", email: "Email", dingtalk: "钉钉" };
+const TEMPLATE_EVENT_ORDER = ["build.finished", "build.passed", "build.failed", "quiet.digest"];
 let projectId = null;
 let integrations = [];
+let defaults = null;          // 后端返回的默认模板 / 占位符元数据
 let editingId = null;
+let editingType = "webhook";
+let templatesDraft = {};      // {event: {title, body}}
+let currentTplEvent = "build.finished";
 
+/* ---------------- 初始化 ---------------- */
 async function init() {
   const params = new URLSearchParams(location.search);
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  if (projectId) {
+    const d = await api("/api/notify/templates/defaults");
+    defaults = d;
+    await refresh();
+    renderPlaceholderChips();
+    renderTplTabs("build.finished");
+  }
+}
+
+async function switchProject(id) {
+  projectId = id; editingId = null;
   await refresh();
 }
 
-async function switchProject(id) { projectId = id; editingId = null; await refresh(); }
+async function refresh() {
+  await Promise.all([loadQuiet(), loadIntegrations(), loadQueue(), loadEvents()]);
+}
 
-async function refresh() { await Promise.all([loadIntegrations(), loadEvents()]); }
+/* ---------------- 静默时段 ---------------- */
+async function loadQuiet() {
+  const s = await api(`/api/projects/${projectId}/quiet`);
+  $("#q-enabled").checked = !!s.enabled;
+  $("#q-start").value = s.start || "22:00";
+  $("#q-end").value = s.end || "08:00";
+  $("#q-weekend").checked = !!s.weekend;
+  const host = $("#quiet-state");
+  if (s.in_quiet) {
+    host.className = "quiet-state in";
+    host.innerHTML = `🌙 当前处于静默时段，通知将保留至 <strong>${fmtTime(s.release_at)}</strong> 合并补发（每个渠道一条汇总）。`;
+  } else if (s.enabled) {
+    host.className = "quiet-state out";
+    host.innerHTML = `☀️ 当前非静默，通知实时投递。每日 ${esc(s.start)}–${esc(s.end)}${s.weekend ? "，周末全天静默" : ""}。`;
+  } else {
+    host.className = "quiet-state out";
+    host.textContent = "静默未启用，所有通知实时投递。";
+  }
+}
 
+$("#btn-save-quiet").onclick = async () => {
+  const body = { enabled: $("#q-enabled").checked, start: $("#q-start").value,
+                 end: $("#q-end").value, weekend: $("#q-weekend").checked };
+  try {
+    await api(`/api/projects/${projectId}/quiet`, { method: "PUT", body });
+    toast("静默设置已保存");
+    refresh();
+  } catch (e) { toast(e.message, "error"); }
+};
+
+$("#btn-flush").onclick = async () => {
+  const r = await api(`/api/projects/${projectId}/quiet/flush`, { method: "POST" });
+  if (r.due === 0) toast("暂无到期消息");
+  else toast(`已处理 ${r.due} 条：${r.digests} 条汇总补发，${r.retries} 条重试`);
+  refresh();
+};
+
+/* ---------------- 集成列表 ---------------- */
 async function loadIntegrations() {
   const d = await api(`/api/projects/${projectId}/integrations`);
   integrations = d.integrations || [];
   const host = $("#int-list");
   if (!integrations.length) { host.innerHTML = '<div class="empty">还没有集成，点击「新建集成」。</div>'; return; }
-  host.innerHTML = integrations.map(x => `
+  host.innerHTML = integrations.map(x => {
+    const tpls = Object.keys(x.templates || {});
+    return `
     <div class="int-item">
       <div class="row spread">
         <div class="row"><span class="badge violet">${esc(TYPE_LABELS[x.type]||x.type)}</span><strong>${esc(x.name)}</strong>
           <span class="badge ${x.enabled?'blue':'pending'}">${x.enabled?'启用':'停用'}</span></div>
         <div class="row">
-          <button class="btn small secondary" onclick="test('${x.id}')">测试</button>
+          <button class="btn small secondary" onclick="testInt('${x.id}')">测试</button>
           <button class="btn small secondary" onclick="toggle('${x.id}', ${!x.enabled})">${x.enabled?'停用':'启用'}</button>
           <button class="btn small secondary" onclick="editInt('${x.id}')">编辑</button>
           <button class="btn small danger" onclick="delInt('${x.id}')">删除</button>
         </div>
       </div>
-      <div class="mt muted" style="font-size:13px">目标: ${esc((x.config||{}).url||(x.config||{}).address||(x.config||{}).channel||"未配置")}</div>
-      <div class="mt" style="font-size:12px">${(x.events||[]).map(e => `<span class="tag">${esc(e)}</span>`).join("")}</div>
-    </div>`).join("");
+      <div class="mt muted" style="font-size:13px">目标: ${esc(targetOf(x))}</div>
+      <div class="mt" style="font-size:12px">
+        ${(x.events||[]).map(e => `<span class="tag">${esc(defaults?.event_labels?.[e]||e)}</span>`).join("")}
+        ${tpls.length ? `<span class="badge blue">自定义模板 ×${tpls.length}</span>` : '<span class="muted">默认模板</span>'}
+      </div>
+    </div>`;
+  }).join("");
 }
 
+function targetOf(x) {
+  return (x.config||{}).url || (x.config||{}).address || (x.config||{}).channel || "未配置";
+}
+
+/* ---------------- 队列 ---------------- */
+async function loadQueue() {
+  const d = await api(`/api/projects/${projectId}/queue`);
+  const items = d.queue || [];
+  const host = $("#queue-list");
+  if (!items.length) { host.innerHTML = '<div class="empty">没有待补发或待重试的消息。</div>'; return; }
+  host.innerHTML = `<div style="max-height:300px;overflow:auto">` + items.map(q => `
+    <div class="queue-item row spread">
+      <div style="flex:1;min-width:0">
+        <div class="row" style="gap:8px">
+          <span class="badge ${q.status==='dead'?'dead':'pending'}">${q.status==='dead'?'重试耗尽':'等待中'}</span>
+          <span class="badge violet">${esc(TYPE_LABELS[q.type]||q.type)}</span>
+          ${q.digest ? '<span class="badge blue">合并补发</span>' : q.deferred ? '<span class="badge deferred">静默保留</span>' : '<span class="badge timeout">失败重试</span>'}
+          <strong>${esc(q.integration_name||q.integration_id)}</strong>
+          <span class="muted">${esc(defaults?.event_labels?.[q.event]||q.event)}</span>
+        </div>
+        <div class="msg-text muted">${esc(q.title)}</div>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          尝试 ${q.attempts}/${q.max_attempts} 次${q.last_error ? " · 上次错误：" + esc(q.last_error) : ""}
+          · ${q.deferred ? "计划补发" : "下次重试"}时间：${fmtTime(q.release_at)}
+        </div>
+      </div>
+      <button class="btn small" onclick="retryNow('${q.id}')">立即重试</button>
+    </div>`).join("") + "</div>";
+}
+
+async function retryNow(id) {
+  try {
+    const r = await api(`/api/queue/${id}/retry`, { method: "POST" });
+    toast(r.status === "delivered" ? "重试成功，已送达" : "重试仍失败，已重新排队",
+          r.status === "delivered" ? "ok" : "error");
+  } catch (e) { toast(e.message, "error"); }
+  refresh();
+}
+
+/* ---------------- 事件日志 ---------------- */
 async function loadEvents() {
   const d = await api(`/api/projects/${projectId}/events`);
   const events = d.events || [];
   const host = $("#event-list");
   if (!events.length) { host.innerHTML = '<div class="empty">暂无投递记录</div>'; return; }
-  host.innerHTML = `<div style="max-height:360px;overflow:auto">` + events.slice(0, 80).map(e => `
-    <div class="evt row spread">
-      <span class="mono" style="font-size:12px">${fmtTime(e.created_at)}</span>
-      <span class="badge ${e.status==='delivered'?'ok':'error'}">${esc(e.status)}</span>
-      <span>${esc(e.integration_name||e.integration_id)} · ${esc(e.event)}</span>
-      <span class="muted" style="font-size:12px">→ ${esc(e.recipient)} (${e.latency_ms}ms)</span>
+  const badgeCls = { delivered: "ok", failed: "error", deferred: "deferred" };
+  host.innerHTML = `<div style="max-height:420px;overflow:auto">` + events.slice(0, 100).map(e => `
+    <div class="evt">
+      <div class="row spread">
+        <span class="mono" style="font-size:12px">${fmtTime(e.created_at)}</span>
+        <span class="badge ${badgeCls[e.status]||'pending'}">${esc(statusText(e))}</span>
+        <span>${esc(e.integration_name||e.integration_id)} · ${esc(defaults?.event_labels?.[e.event]||e.event)}${e.digest?'（汇总 '+e.queued_count+' 条）':''}${e.attempt>1?(' · 第 '+e.attempt+' 次'):''}</span>
+        <span class="muted" style="font-size:12px">→ ${esc(e.recipient)} (${e.latency_ms}ms)</span>
+      </div>
+      ${(e.title || e.body) ? `<details class="evt-detail"><summary>查看消息内容</summary><div class="msg-text"><strong>${esc(e.title)}</strong>\n${esc(e.body)}</div>${e.error?`<div class="muted" style="font-size:12px;color:var(--red)">错误：${esc(e.error)}</div>`:""}</details>` : ""}
     </div>`).join("") + "</div>";
 }
 
+function statusText(e) {
+  if (e.status === "delivered") return "已送达";
+  if (e.status === "deferred") return "静默保留";
+  if (e.status === "failed") return "投递失败";
+  return e.status;
+}
+
+/* ---------------- 集成编辑 ---------------- */
 function typeChanged() {
   const t = $("#i-type").value;
+  editingType = t;
   const map = { webhook: ["URL", "https://example.com/hooks/ci"],
     slack: ["Webhook URL", "https://hooks.slack.com/services/..."],
     email: ["收件地址", "qa@example.com"],
     dingtalk: ["机器人 Webhook", "https://oapi.dingtalk.com/robot/send?access_token=..."] };
   $("#i-target-label").textContent = map[t][0];
   $("#i-target").placeholder = map[t][1];
-  $("#i-name").value = $("#i-name").value || TYPE_LABELS[t];
+  if (!editingId) $("#i-name").value = TYPE_LABELS[t];
+  // 切换渠道：未保存的自定义模板重置（默认模板随渠道变化）
+  templatesDraft = {};
+  $("#tpl-preview").hidden = true;
+  renderTplTabs(currentTplEvent);
 }
+
+function renderPlaceholderChips() {
+  $("#ph-list").innerHTML = (defaults.placeholders || []).map(p =>
+    `<span class="ph-chip" title="${esc(p.desc)}" onclick="insertPlaceholder('${p.token}')">${esc(p.token)}</span>`
+  ).join("");
+}
+
+function insertPlaceholder(token) {
+  const ta = $("#t-body");
+  const start = ta.selectionStart ?? ta.value.length;
+  ta.value = ta.value.slice(0, start) + token + ta.value.slice(ta.selectionEnd ?? start);
+  ta.focus(); ta.setSelectionRange(start + token.length, start + token.length);
+  saveCurrentTplToDraft();
+}
+
+function renderTplTabs(activeEvent) {
+  currentTplEvent = activeEvent;
+  $("#tpl-tabs").innerHTML = TEMPLATE_EVENT_ORDER.map(ev =>
+    `<button class="tpl-tab ${ev===activeEvent?'active':''}" onclick="switchTpl('${ev}')">${esc(defaults?.event_labels?.[ev]||ev)}</button>`
+  ).join("");
+  loadTplIntoEditor(activeEvent);
+}
+
+function switchTpl(ev) {
+  saveCurrentTplToDraft();
+  renderTplTabs(ev);
+  $("#tpl-preview").hidden = true;
+}
+
+function effectiveTemplate(ev) {
+  // 草稿优先；编辑已有集成时草稿初始值来自集成自定义模板，否则渠道默认
+  if (templatesDraft[ev]) return templatesDraft[ev];
+  if (editingId) {
+    const x = integrations.find(v => v.id === editingId);
+    const custom = x && (x.templates || {})[ev];
+    if (custom) return { title: custom.title || "", body: custom.body || "" };
+  }
+  const d = defaults.templates[editingType]?.[ev] || defaults.templates.webhook[ev];
+  return { title: "", body: "", fallback: d };  // 空串表示用默认
+}
+
+function loadTplIntoEditor(ev) {
+  const t = effectiveTemplate(ev);
+  $("#t-title").value = t.title || "";
+  $("#t-body").value = t.body || "";
+}
+
+function saveCurrentTplToDraft() {
+  templatesDraft[currentTplEvent] = {
+    title: $("#t-title").value, body: $("#t-body").value
+  };
+}
+
+$("#btn-preview").onclick = async () => {
+  saveCurrentTplToDraft();
+  const t = templatesDraft[currentTplEvent] || {};
+  const r = await api("/api/notify/templates/preview", {
+    method: "POST",
+    body: { type: editingType, event: currentTplEvent,
+            title: t.title || "", body: t.body || "" }
+  });
+  $("#pv-title").textContent = r.title;
+  $("#pv-body").textContent = r.body;
+  $("#tpl-preview").hidden = false;
+};
+
+$("#btn-reset-tpl").onclick = () => {
+  if (!confirm("恢复为该渠道默认模板？当前事件的自定义内容将被清空。")) return;
+  delete templatesDraft[currentTplEvent];
+  loadTplIntoEditor(currentTplEvent);
+  $("#tpl-preview").hidden = true;
+};
 
 function newInt() {
   editingId = null;
+  templatesDraft = {};
   $("#edit-title").textContent = "新建集成";
-  $("#i-type").value = "webhook"; $("#i-name").value = ""; $("#i-enabled").checked = true;
+  $("#i-type").value = "webhook"; editingType = "webhook";
+  $("#i-name").value = ""; $("#i-enabled").checked = true;
+  $("#i-target").value = "";
   $$(".evt-chk").forEach(c => c.checked = c.value === "build.finished");
   typeChanged();
+  $("#tpl-preview").hidden = true;
 }
 
 function editInt(id) {
   const x = integrations.find(v => v.id === id);
   if (!x) return;
   editingId = id;
+  templatesDraft = {};
   $("#edit-title").textContent = "编辑集成";
-  $("#i-type").value = x.type; $("#i-name").value = x.name || ""; $("#i-enabled").checked = x.enabled !== false;
-  const target = (x.config||{}).url || (x.config||{}).address || (x.config||{}).channel || "";
-  $("#i-target").value = target;
+  $("#i-type").value = x.type; editingType = x.type;
+  $("#i-name").value = x.name || ""; $("#i-enabled").checked = x.enabled !== false;
+  $("#i-target").value = targetOf(x);
   $$(".evt-chk").forEach(c => c.checked = (x.events||[]).includes(c.value));
   typeChanged();
+  renderTplTabs("build.finished");
+  $("#tpl-preview").hidden = true;
 }
 
 async function toggle(id, enabled) {
@@ -170,30 +429,43 @@ async function delInt(id) {
   refresh();
 }
 
-async function test(id) {
-  const r = await api(`/api/integrations/${id}/test`, { method: "POST" });
-  toast(`测试投递: ${r.status} (${r.latency_ms}ms)`, r.status === "delivered" ? "ok" : "error");
+async function testInt(id) {
+  try {
+    const r = await api(`/api/integrations/${id}/test`, { method: "POST" });
+    toast(`测试投递: ${r.status==='delivered'?'已送达':'失败'} (${r.latency_ms}ms)`,
+          r.status === "delivered" ? "ok" : "error");
+  } catch (e) { toast(e.message, "error"); }
   loadEvents();
 }
 
 $("#btn-new").onclick = newInt;
-$("#btn-cancel").onclick = () => { editingId = null; };
+$("#btn-cancel").onclick = () => { editingId = null; newInt(); };
 
 $("#btn-save").onclick = async () => {
+  saveCurrentTplToDraft();
   const type = $("#i-type").value;
   const target = $("#i-target").value.trim();
-  const config = type === "email" ? { address: target } : type === "slack" ? { url: target }
-    : type === "dingtalk" ? { url: target } : { url: target };
-  const body = { type, name: $("#i-name").value || TYPE_LABELS[type], enabled: $("#i-enabled").checked,
-    config, events: $$(".evt-chk").filter(c => c.checked).map(c => c.value) };
-  if (editingId) {
-    await api(`/api/integrations/${editingId}`, { method: "PUT", body });
-    toast("已保存");
-  } else {
-    await api(`/api/projects/${projectId}/integrations`, { method: "POST", body });
-    toast("已创建");
+  const config = type === "email" ? { address: target } : { url: target };
+  const templates = {};
+  for (const ev of TEMPLATE_EVENT_ORDER) {
+    const t = templatesDraft[ev];
+    if (t && (t.title.trim() || t.body.trim())) templates[ev] = t;
   }
-  refresh();
+  const body = { type, name: $("#i-name").value || TYPE_LABELS[type],
+    enabled: $("#i-enabled").checked, config,
+    events: $$(".evt-chk").filter(c => c.checked).map(c => c.value),
+    templates };
+  try {
+    if (editingId) {
+      await api(`/api/integrations/${editingId}`, { method: "PUT", body });
+      toast("已保存");
+    } else {
+      await api(`/api/projects/${projectId}/integrations`, { method: "POST", body });
+      toast("已创建");
+    }
+    newInt();
+    refresh();
+  } catch (e) { toast(e.message, "error"); }
 };
 
 init();
